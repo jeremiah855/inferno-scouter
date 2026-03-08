@@ -1,27 +1,36 @@
 package com.infernoscouter;
 
-import java.awt.Toolkit;
-import java.awt.datatransfer.StringSelection;
+import com.google.inject.Provides;
+import java.awt.Color;
 import java.awt.image.BufferedImage;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashSet;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import javax.inject.Inject;
+import net.runelite.api.ChatMessageType;
 import net.runelite.api.Client;
 import net.runelite.api.GameState;
 import net.runelite.api.NPC;
 import net.runelite.api.coords.WorldPoint;
+import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.ClientTick;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.NpcSpawned;
+import net.runelite.client.config.ConfigManager;
+import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
 import net.runelite.client.util.ImageUtil;
+import net.runelite.client.util.Text;
 
 @PluginDescriptor(
         name = "Inferno Scouter",
@@ -30,19 +39,12 @@ import net.runelite.client.util.ImageUtil;
 )
 public class InfernoScouterPlugin extends Plugin
 {
-    // TEMP: debugging — remove later
-    private static final boolean DEBUG_COPY_TO_CLIPBOARD = false;
-
-    @Inject private Client client;
-    @Inject private ClientToolbar clientToolbar;
-
-    private InfernoScouterPanel panel;
-    private NavigationButton navButton;
-
-    // Inferno region gate
     private static final int INFERNO_REGION_ID = 9043;
+    private static final int REGION_X_OFFSET = 17;
+    private static final int REGION_Y_OFFSET = 46;
+    private static final Pattern WAVE_MESSAGE = Pattern.compile("Wave: (\\d+)");
+    private static final Color PLACEHOLDER_COLOR = new Color(210, 210, 210);
 
-    // Only the 5 Inferno enemies you care about
     private static final Set<Integer> ALLOWED_NPC_IDS = Set.of(
             7692, // Jal-MejRah (bat)
             7693, // Jal-Ak (blob)
@@ -53,118 +55,33 @@ public class InfernoScouterPlugin extends Plugin
             7703  // Jal-Zek (alt)
     );
 
-    // ===== Canonical 9-tile SHAPE (from one session) =====
-    // We do NOT assume these absolute coords are stable.
-    // We only use them as a reference shape for calibration (translation + rotation).
-    private static final List<P> CANON = buildCanonReadingOrder();
-    private static final Set<Long> CANON_SET = new HashSet<>();
-    private static final long[] CANON_KEYS; // in reading order
-    static
-    {
-        for (P p : CANON)
-        {
-            CANON_SET.add(key(p.x, p.y));
-        }
-        CANON_KEYS = new long[CANON.size()];
-        for (int i = 0; i < CANON.size(); i++)
-        {
-            CANON_KEYS[i] = key(CANON.get(i).x, CANON.get(i).y);
-        }
-    }
+    private static final List<P> REGION_SPAWNS = buildRegionSpawns();
+    private static final Map<Long, Integer> REGION_INDEX = buildRegionIndex(REGION_SPAWNS);
 
-    private static List<P> buildCanonReadingOrder()
-    {
-        List<P> pts = new ArrayList<>();
-        pts.add(new P(12050, 1641));
-        pts.add(new P(12071, 1641));
-        pts.add(new P(12052, 1635));
-        pts.add(new P(12072, 1634));
-        pts.add(new P(12065, 1629));
-        pts.add(new P(12054, 1623));
-        pts.add(new P(12072, 1621));
-        pts.add(new P(12050, 1618));
-        pts.add(new P(12064, 1618));
+    @Inject private Client client;
+    @Inject private ClientToolbar clientToolbar;
+    @Inject private InfernoScouterConfig config;
 
-        // Reading order: north->south (y desc), west->east (x asc)
-        pts.sort((a, b) ->
-        {
-            if (a.y != b.y) return Integer.compare(b.y, a.y);
-            return Integer.compare(a.x, b.x);
-        });
-        return pts;
-    }
+    private InfernoScouterPanel panel;
+    private NavigationButton navButton;
 
-    private static final class P
-    {
-        final int x, y;
-        P(int x, int y) { this.x = x; this.y = y; }
-    }
-
-    private enum Rot
-    {
-        R0, R90, R180, R270;
-
-        P rot(P p)
-        {
-            switch (this)
-            {
-                case R0:   return new P(p.x, p.y);
-                case R90:  return new P(p.y, -p.x);
-                case R180: return new P(-p.x, -p.y);
-                case R270: return new P(-p.y, p.x);
-                default:   return new P(p.x, p.y);
-            }
-        }
-
-        P inv(int x, int y)
-        {
-            switch (this)
-            {
-                case R0:   return new P(x, y);
-                case R90:  return new P(-y, x);
-                case R180: return new P(-x, -y);
-                case R270: return new P(y, -x);
-                default:   return new P(x, y);
-            }
-        }
-    }
-
-    private static final class Cand
-    {
-        final Rot r;
-        final int dx, dy; // observed = r(canon) + (dx,dy)
-        Cand(Rot r, int dx, int dy) { this.r = r; this.dx = dx; this.dy = dy; }
-    }
-
-    // ===== Runtime state =====
     private String lastCode = "[?????????]";
-    private boolean calibrated = false;
+    private int currentWaveNumber = -1;
+    private int pendingWaveNumber = -1;
+    private int pendingWaveStartTick = -1;
 
-    private final Set<Long> seenPoints = new HashSet<>();
-    private final List<Cand> candidates = new ArrayList<>();
+    private final List<SpawnSnapshot> currentWaveSpawns = new ArrayList<>();
 
-    // batch capture (same game tick)
     private int batchTick = -1;
     private int quietClientTicks = 0;
     private boolean batchOpen = false;
-    private final List<Snap> batch = new ArrayList<>();
+    private int batchWaveNumber = -1;
+    private final List<SpawnSnapshot> batch = new ArrayList<>();
 
-    private static final class Snap
+    @Provides
+    InfernoScouterConfig provideConfig(ConfigManager configManager)
     {
-        final String name;
-        final int id;
-        final int x, y, plane;
-        final char letter;
-
-        Snap(String name, int id, int x, int y, int plane, char letter)
-        {
-            this.name = name;
-            this.id = id;
-            this.x = x;
-            this.y = y;
-            this.plane = plane;
-            this.letter = letter;
-        }
+        return configManager.getConfig(InfernoScouterConfig.class);
     }
 
     @Override
@@ -172,7 +89,15 @@ public class InfernoScouterPlugin extends Plugin
     {
         panel = new InfernoScouterPanel();
         panel.setCode(lastCode);
-        panel.setCalibrated(calibrated);
+        panel.setWaveNumber(currentWaveNumber);
+        panel.setSpawns(buildInitialSpawns());
+        panel.setLegendColors(
+                config.batColor(),
+                config.blobColor(),
+                config.meleeColor(),
+                config.rangerColor(),
+                config.magerColor()
+        );
 
         BufferedImage icon;
         try
@@ -212,21 +137,42 @@ public class InfernoScouterPlugin extends Plugin
     @Subscribe
     public void onGameStateChanged(GameStateChanged e)
     {
-        // IMPORTANT: do NOT clear the displayed code/status on logout
-        // (scouting requires logging out right after the wave spawns)
-
-        // If we were mid-batch and the user logs out, finalize now.
         if (batchOpen && e.getGameState() != GameState.LOGGED_IN)
         {
-            finalizeBatch("logout");
+            finalizeBatch();
             clearBatch();
         }
 
-        // If we logged in, reset calibration because instance coords can change.
-        // (but keep lastCode visible)
-        if (e.getGameState() == GameState.LOGGED_IN)
+        if (e.getGameState() != GameState.LOGGED_IN)
         {
-            resetCalibration();
+            pendingWaveNumber = -1;
+            pendingWaveStartTick = -1;
+        }
+    }
+
+    @Subscribe
+    public void onChatMessage(ChatMessage event)
+    {
+        if (client.getGameState() != GameState.LOGGED_IN)
+        {
+            return;
+        }
+
+        if (event.getType() != ChatMessageType.SPAM && event.getType() != ChatMessageType.GAMEMESSAGE)
+        {
+            return;
+        }
+
+        String message = Text.removeTags(event.getMessage());
+        Matcher matcher = WAVE_MESSAGE.matcher(message);
+        if (matcher.find())
+        {
+            pendingWaveNumber = Integer.parseInt(matcher.group(1));
+            pendingWaveStartTick = client.getTickCount();
+            if (batchOpen && batchTick == pendingWaveStartTick && batchWaveNumber <= 0)
+            {
+                batchWaveNumber = pendingWaveNumber;
+            }
         }
     }
 
@@ -244,27 +190,36 @@ public class InfernoScouterPlugin extends Plugin
             return;
         }
 
+        int tick = client.getTickCount();
+        if (pendingWaveStartTick >= 0 && (tick - pendingWaveStartTick) > 2)
+        {
+            return;
+        }
+
         WorldPoint wp = npc.getWorldLocation();
         if (wp == null)
         {
             return;
         }
 
-        int tick = client.getTickCount();
-
         if (!batchOpen || tick != batchTick)
         {
-            // start new batch (new wave spawn tick)
             batchOpen = true;
             batchTick = tick;
+            batchWaveNumber = pendingWaveNumber;
             batch.clear();
             quietClientTicks = 0;
         }
 
         quietClientTicks = 0;
 
-        String name = npc.getName() == null ? "npc" : npc.getName();
-        batch.add(new Snap(name, npc.getId(), wp.getX(), wp.getY(), wp.getPlane(), letterFor(npc)));
+        MobType type = typeFor(npc);
+        if (type == null)
+        {
+            return;
+        }
+
+        batch.add(new SpawnSnapshot(type, wp.getRegionX(), wp.getRegionY()));
     }
 
     @Subscribe
@@ -275,240 +230,145 @@ public class InfernoScouterPlugin extends Plugin
             return;
         }
 
-        // If game tick advanced, finalize (fallback)
         int now = client.getTickCount();
         if (now > batchTick)
         {
-            finalizeBatch("tick-advanced");
+            finalizeBatch();
             clearBatch();
             return;
         }
 
-        // Same game tick: finalize after a couple quiet client ticks
         quietClientTicks++;
         if (quietClientTicks >= 2)
         {
-            finalizeBatch("quiet-clientticks");
+            finalizeBatch();
             clearBatch();
         }
     }
 
-    private void finalizeBatch(String reason)
+    @Subscribe
+    public void onConfigChanged(ConfigChanged event)
+    {
+        if (!"infernoscout".equals(event.getGroup()))
+        {
+            return;
+        }
+
+        if (panel != null)
+        {
+            panel.setLegendColors(
+                    config.batColor(),
+                    config.blobColor(),
+                    config.meleeColor(),
+                    config.rangerColor(),
+                    config.magerColor()
+            );
+            panel.setSpawns(buildInitialSpawns());
+        }
+    }
+
+    private void finalizeBatch()
     {
         if (batch.isEmpty())
         {
             return;
         }
 
-        // Feed observed points into calibration
-        for (Snap s : batch)
-        {
-            learnPoint(s.x, s.y);
-        }
-
-        calibrated = (candidates.size() == 1);
-        if (panel != null)
-        {
-            panel.setCalibrated(calibrated);
-        }
-
-        // IMPORTANT CHANGE:
-        // Always overwrite the code on each captured wave.
-        // If not calibrated yet, show [?????????] so you can tell it captured a new wave.
-        final String codeOut;
-        if (calibrated)
-        {
-            codeOut = buildCode(batch, candidates.get(0));
-        }
-        else
-        {
-            codeOut = "[?????????]";
-        }
-
-        lastCode = codeOut;
-        if (panel != null)
-        {
-            panel.setCode(lastCode);
-        }
-
-        // TEMP DEBUG: copy to clipboard every finalize
-        if (DEBUG_COPY_TO_CLIPBOARD)
-        {
-            debugCopy(buildDebugString(reason, codeOut));
-        }
-    }
-
-    private String buildDebugString(String reason, String codeOut)
-    {
-        StringBuilder sb = new StringBuilder(512);
-        sb.append("InfernoScouter DEBUG\n");
-        sb.append("finalizeReason=").append(reason).append("\n");
-        sb.append("gameTick=").append(batchTick).append("\n");
-        sb.append("code=").append(codeOut).append("\n");
-        sb.append("calibrated=").append(calibrated).append("\n");
-        sb.append("seenPoints=").append(seenPoints.size()).append("\n");
-        sb.append("candidates=").append(candidates.size()).append("\n");
-
-        if (!candidates.isEmpty())
-        {
-            sb.append("candidateList=");
-            for (int i = 0; i < candidates.size(); i++)
-            {
-                Cand c = candidates.get(i);
-                sb.append(c.r).append("(").append(c.dx).append(",").append(c.dy).append(")");
-                if (i + 1 < candidates.size()) sb.append(" ");
-            }
-            sb.append("\n");
-        }
-
-        sb.append("batch=[");
-        for (int i = 0; i < batch.size(); i++)
-        {
-            Snap s = batch.get(i);
-            sb.append(s.name)
-                    .append("#").append(s.id)
-                    .append("@").append(s.x).append(",").append(s.y).append(",").append(s.plane);
-            if (i + 1 < batch.size()) sb.append("; ");
-        }
-        sb.append("]\n");
-
-        return sb.toString();
-    }
-
-    private static void debugCopy(String text)
-    {
-        try
-        {
-            Toolkit.getDefaultToolkit().getSystemClipboard().setContents(new StringSelection(text), null);
-        }
-        catch (Exception ignored)
-        {
-        }
-    }
-
-    private void resetCalibration()
-    {
-        seenPoints.clear();
-        candidates.clear();
-        calibrated = false;
-        if (panel != null)
-        {
-            panel.setCalibrated(false);
-        }
-    }
-
-    private void learnPoint(int x, int y)
-    {
-        long k = key(x, y);
-        if (!seenPoints.add(k))
+        if (batchWaveNumber <= 0)
         {
             return;
         }
 
-        recomputeCandidates();
-        if (candidates.isEmpty())
+        lastCode = buildCode(batch);
+        currentWaveSpawns.clear();
+        currentWaveSpawns.addAll(batch);
+
+        if (batchWaveNumber > 0)
         {
-            // likely instance changed — restart calibration from this point only
-            seenPoints.clear();
-            seenPoints.add(k);
-            recomputeCandidates();
+            currentWaveNumber = batchWaveNumber;
         }
+
+        pendingWaveNumber = -1;
+        pendingWaveStartTick = -1;
+
+        updatePanel();
     }
 
-    private void recomputeCandidates()
+    private void updatePanel()
     {
-        candidates.clear();
-        if (seenPoints.isEmpty())
+        if (panel == null)
         {
             return;
         }
 
-        long first = seenPoints.iterator().next();
-        int ox0 = xOf(first);
-        int oy0 = yOf(first);
-
-        List<Long> seen = new ArrayList<>(seenPoints);
-
-        for (Rot r : Rot.values())
-        {
-            for (P p0 : CANON)
-            {
-                P rp0 = r.rot(p0);
-                int dx = ox0 - rp0.x;
-                int dy = oy0 - rp0.y;
-
-                Cand cand = new Cand(r, dx, dy);
-                if (candValid(cand, seen))
-                {
-                    candidates.add(cand);
-                }
-            }
-        }
+        panel.setCode(lastCode);
+        panel.setWaveNumber(currentWaveNumber);
+        panel.setSpawns(buildInitialSpawns());
     }
 
-    private boolean candValid(Cand c, List<Long> seen)
-    {
-        Set<Long> mappedCanon = new HashSet<>();
-        for (long k : seen)
-        {
-            int ox = xOf(k);
-            int oy = yOf(k);
-
-            int rx = ox - c.dx;
-            int ry = oy - c.dy;
-            P canonP = c.r.inv(rx, ry);
-
-            long ck = key(canonP.x, canonP.y);
-            if (!CANON_SET.contains(ck))
-            {
-                return false;
-            }
-            if (!mappedCanon.add(ck))
-            {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    private String buildCode(List<Snap> wave, Cand c)
+    private String buildCode(List<SpawnSnapshot> wave)
     {
         char[] out = new char[9];
         Arrays.fill(out, 'o');
 
-        for (Snap s : wave)
+        for (SpawnSnapshot s : wave)
         {
-            int rx = s.x - c.dx;
-            int ry = s.y - c.dy;
-            P canonP = c.r.inv(rx, ry);
-
-            int idx = canonIndex(canonP.x, canonP.y);
+            int idx = indexForRegion(s.regionX, s.regionY);
             if (idx >= 0 && idx < out.length)
             {
-                out[idx] = s.letter;
+                out[idx] = letterFor(s.type);
             }
         }
 
         return "[" + new String(out) + "]";
     }
 
-    private int canonIndex(int x, int y)
+    private List<InfernoSpawnImage.Spawn> buildRenderSpawns(List<SpawnSnapshot> wave)
     {
-        long k = key(x, y);
-        for (int i = 0; i < CANON_KEYS.length; i++)
+        List<InfernoSpawnImage.Spawn> spawns = new ArrayList<>();
+        for (SpawnSnapshot s : wave)
         {
-            if (CANON_KEYS[i] == k)
+            int x = s.regionX - REGION_X_OFFSET;
+            int y = REGION_Y_OFFSET - s.regionY;
+            if (x < 0 || y < 0)
             {
-                return i;
+                continue;
             }
+
+            spawns.add(new InfernoSpawnImage.Spawn(x, y, sizeFor(s.type), colorFor(s.type), letterFor(s.type)));
         }
-        return -1;
+        return spawns;
+    }
+
+    private List<InfernoSpawnImage.Spawn> buildInitialSpawns()
+    {
+        if (!currentWaveSpawns.isEmpty())
+        {
+            return buildRenderSpawns(currentWaveSpawns);
+        }
+
+        List<InfernoSpawnImage.Spawn> spawns = new ArrayList<>();
+        for (int i = 0; i < REGION_SPAWNS.size(); i++)
+        {
+            P p = REGION_SPAWNS.get(i);
+            int x = p.x - REGION_X_OFFSET;
+            int y = REGION_Y_OFFSET - p.y;
+            if (x < 0 || y < 0)
+            {
+                continue;
+            }
+
+            char number = (char) ('1' + i);
+            spawns.add(new InfernoSpawnImage.Spawn(x, y, 1, PLACEHOLDER_COLOR, number));
+        }
+        return spawns;
     }
 
     private void clearBatch()
     {
         batchOpen = false;
         batchTick = -1;
+        batchWaveNumber = -1;
         quietClientTicks = 0;
         batch.clear();
     }
@@ -534,25 +394,137 @@ public class InfernoScouterPlugin extends Plugin
         return false;
     }
 
-    private static char letterFor(NPC npc)
+    private static int indexForRegion(int x, int y)
+    {
+        Integer idx = REGION_INDEX.get(key(x, y));
+        return idx == null ? -1 : idx;
+    }
+
+    private static char letterFor(MobType type)
+    {
+        switch (type)
+        {
+            case BAT: return 'Y';
+            case BLOB: return 'B';
+            case MELEE: return 'X';
+            case RANGER: return 'R';
+            case MAGER: return 'M';
+            default: return '?';
+        }
+    }
+
+    private static int sizeFor(MobType type)
+    {
+        switch (type)
+        {
+            case BAT: return 2;
+            case BLOB: return 3;
+            case MELEE: return 4;
+            case RANGER: return 3;
+            case MAGER: return 4;
+            default: return 2;
+        }
+    }
+
+    private Color colorFor(MobType type)
+    {
+        switch (type)
+        {
+            case BAT: return config.batColor();
+            case BLOB: return config.blobColor();
+            case MELEE: return config.meleeColor();
+            case RANGER: return config.rangerColor();
+            case MAGER: return config.magerColor();
+            default: return Color.WHITE;
+        }
+    }
+
+    private static MobType typeFor(NPC npc)
     {
         String name = npc.getName();
-        if ("Jal-MejRah".equals(name)) return 'Y';
-        if ("Jal-Ak".equals(name))     return 'B';
-        if ("Jal-ImKot".equals(name))  return 'X';
-        if ("Jal-Xil".equals(name))    return 'R';
-        if ("Jal-Zek".equals(name))    return 'M';
+        if ("Jal-MejRah".equals(name)) return MobType.BAT;
+        if ("Jal-Ak".equals(name)) return MobType.BLOB;
+        if ("Jal-ImKot".equals(name)) return MobType.MELEE;
+        if ("Jal-Xil".equals(name)) return MobType.RANGER;
+        if ("Jal-Zek".equals(name)) return MobType.MAGER;
 
         switch (npc.getId())
         {
-            case 7692: return 'Y';
-            case 7693: return 'B';
-            case 7697: return 'X';
+            case 7692: return MobType.BAT;
+            case 7693: return MobType.BLOB;
+            case 7697: return MobType.MELEE;
             case 7698:
-            case 7702: return 'R';
+            case 7702: return MobType.RANGER;
             case 7699:
-            case 7703: return 'M';
-            default:   return '?';
+            case 7703: return MobType.MAGER;
+            default: return null;
+        }
+    }
+
+    private static List<P> buildRegionSpawns()
+    {
+        List<P> pts = new ArrayList<>();
+        pts.add(new P(18, 41));
+        pts.add(new P(39, 41));
+        pts.add(new P(20, 35));
+        pts.add(new P(40, 34));
+        pts.add(new P(33, 29));
+        pts.add(new P(22, 23));
+        pts.add(new P(40, 21));
+        pts.add(new P(18, 18));
+        pts.add(new P(32, 18));
+
+        pts.sort((a, b) ->
+        {
+            if (a.y != b.y) return Integer.compare(b.y, a.y);
+            return Integer.compare(a.x, b.x);
+        });
+
+        return Collections.unmodifiableList(pts);
+    }
+
+    private static Map<Long, Integer> buildRegionIndex(List<P> pts)
+    {
+        Map<Long, Integer> map = new HashMap<>();
+        for (int i = 0; i < pts.size(); i++)
+        {
+            P p = pts.get(i);
+            map.put(key(p.x, p.y), i);
+        }
+        return Collections.unmodifiableMap(map);
+    }
+
+    private static final class P
+    {
+        final int x;
+        final int y;
+        P(int x, int y)
+        {
+            this.x = x;
+            this.y = y;
+        }
+    }
+
+    private enum MobType
+    {
+        BAT,
+        BLOB,
+        MELEE,
+        RANGER,
+        MAGER
+    }
+
+    private static final class SpawnSnapshot
+    {
+        final MobType type;
+        final int regionX;
+        final int regionY;
+
+        SpawnSnapshot(MobType type, int regionX, int regionY)
+        {
+            this.type = type;
+            this.regionX = regionX;
+            this.regionY = regionY;
         }
     }
 
@@ -560,6 +532,4 @@ public class InfernoScouterPlugin extends Plugin
     {
         return (((long) x) << 32) ^ (y & 0xffffffffL);
     }
-    private static int xOf(long k) { return (int) (k >> 32); }
-    private static int yOf(long k) { return (int) k; }
 }

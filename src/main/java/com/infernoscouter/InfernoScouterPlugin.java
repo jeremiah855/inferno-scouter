@@ -1,6 +1,5 @@
 package com.infernoscouter;
 
-import com.google.gson.Gson;
 import com.google.gson.JsonSyntaxException;
 import com.google.inject.Provides;
 import java.awt.Color;
@@ -55,7 +54,6 @@ public class InfernoScouterPlugin extends Plugin
     private static final Color PLACEHOLDER_COLOR = new Color(210, 210, 210);
     private static final Color START_TILE_COLOR = new Color(0xFF51B4BA, true);
     private static final String START_TILE_LABEL = "Start";
-    private static final Gson GSON = new Gson();
 
     private static final Set<Integer> ALLOWED_NPC_IDS = Set.of(
             7692, // Jal-MejRah (bat)
@@ -75,6 +73,7 @@ public class InfernoScouterPlugin extends Plugin
     @Inject private OverlayManager overlayManager;
     @Inject private InfernoScouterConfig config;
     @Inject private InfernoStartTileOverlay startTileOverlay;
+    @Inject private com.google.gson.Gson gson;
 
     private InfernoScouterPanel panel;
     private NavigationButton navButton;
@@ -407,7 +406,7 @@ public class InfernoScouterPlugin extends Plugin
         TileMarkerData[] markers;
         try
         {
-            markers = GSON.fromJson(trimmed, TileMarkerData[].class);
+            markers = gson.fromJson(trimmed, TileMarkerData[].class);
         }
         catch (JsonSyntaxException ex)
         {

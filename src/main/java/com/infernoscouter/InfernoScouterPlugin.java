@@ -1,8 +1,14 @@
 package com.infernoscouter;
 
+import com.google.gson.Gson;
+import com.google.gson.JsonSyntaxException;
 import com.google.inject.Provides;
 import java.awt.Color;
+import java.awt.Toolkit;
+import java.awt.datatransfer.DataFlavor;
+import java.awt.datatransfer.UnsupportedFlavorException;
 import java.awt.image.BufferedImage;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -29,6 +35,7 @@ import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
+import net.runelite.client.ui.overlay.OverlayManager;
 import net.runelite.client.util.ImageUtil;
 import net.runelite.client.util.Text;
 
@@ -42,8 +49,13 @@ public class InfernoScouterPlugin extends Plugin
     private static final int INFERNO_REGION_ID = 9043;
     private static final int REGION_X_OFFSET = 17;
     private static final int REGION_Y_OFFSET = 46;
+    private static final int GRID_WIDTH = 29;
+    private static final int GRID_HEIGHT = 30;
     private static final Pattern WAVE_MESSAGE = Pattern.compile("Wave: (\\d+)");
     private static final Color PLACEHOLDER_COLOR = new Color(210, 210, 210);
+    private static final Color START_TILE_COLOR = new Color(0xFF51B4BA, true);
+    private static final String START_TILE_LABEL = "Start";
+    private static final Gson GSON = new Gson();
 
     private static final Set<Integer> ALLOWED_NPC_IDS = Set.of(
             7692, // Jal-MejRah (bat)
@@ -60,7 +72,9 @@ public class InfernoScouterPlugin extends Plugin
 
     @Inject private Client client;
     @Inject private ClientToolbar clientToolbar;
+    @Inject private OverlayManager overlayManager;
     @Inject private InfernoScouterConfig config;
+    @Inject private InfernoStartTileOverlay startTileOverlay;
 
     private InfernoScouterPanel panel;
     private NavigationButton navButton;
@@ -69,6 +83,8 @@ public class InfernoScouterPlugin extends Plugin
     private int currentWaveNumber = -1;
     private int pendingWaveNumber = -1;
     private int pendingWaveStartTick = -1;
+    private StartTile startTile = null;
+    private String startTileDisplayText = "";
 
     private final List<SpawnSnapshot> currentWaveSpawns = new ArrayList<>();
 
@@ -91,6 +107,9 @@ public class InfernoScouterPlugin extends Plugin
         panel.setCode(lastCode);
         panel.setWaveNumber(currentWaveNumber);
         panel.setSpawns(buildInitialSpawns());
+        panel.setStartTileActions(this::handlePasteStartTile, this::handleResetStartTile);
+        panel.setStartTileDisplay(startTileDisplayText);
+        applyStartTileToPanel();
         panel.setLegendColors(
                 config.batColor(),
                 config.blobColor(),
@@ -121,6 +140,7 @@ public class InfernoScouterPlugin extends Plugin
                 .build();
 
         clientToolbar.addNavigation(navButton);
+        overlayManager.add(startTileOverlay);
     }
 
     @Override
@@ -130,6 +150,10 @@ public class InfernoScouterPlugin extends Plugin
         {
             clientToolbar.removeNavigation(navButton);
             navButton = null;
+        }
+        if (startTileOverlay != null)
+        {
+            overlayManager.remove(startTileOverlay);
         }
         panel = null;
     }
@@ -304,6 +328,117 @@ public class InfernoScouterPlugin extends Plugin
         panel.setCode(lastCode);
         panel.setWaveNumber(currentWaveNumber);
         panel.setSpawns(buildInitialSpawns());
+        applyStartTileToPanel();
+    }
+
+    private void handlePasteStartTile()
+    {
+        String text = readClipboardText();
+        StartTile parsed = parseStartTile(text);
+        if (parsed == null)
+        {
+            startTile = null;
+            startTileDisplayText = "X";
+        }
+        else
+        {
+            startTile = parsed;
+            startTileDisplayText = "(" + parsed.gridX + ", " + parsed.gridY + ")";
+        }
+
+        applyStartTileToPanel();
+    }
+
+    private void handleResetStartTile()
+    {
+        startTile = null;
+        startTileDisplayText = "";
+        applyStartTileToPanel();
+    }
+
+    private void applyStartTileToPanel()
+    {
+        if (panel == null)
+        {
+            return;
+        }
+
+        if (startTile != null)
+        {
+            panel.setStartTile(startTile.gridX, startTile.gridY, startTile.color);
+        }
+        else
+        {
+            panel.clearStartTile();
+        }
+        panel.setStartTileDisplay(startTileDisplayText);
+    }
+
+    private static String readClipboardText()
+    {
+        try
+        {
+            Object data = Toolkit.getDefaultToolkit().getSystemClipboard().getData(DataFlavor.stringFlavor);
+            if (data instanceof String)
+            {
+                return (String) data;
+            }
+        }
+        catch (UnsupportedFlavorException | IOException | IllegalStateException ignored)
+        {
+            // Clipboard unavailable
+        }
+        return null;
+    }
+
+    private StartTile parseStartTile(String text)
+    {
+        if (text == null)
+        {
+            return null;
+        }
+
+        String trimmed = text.trim();
+        if (trimmed.isEmpty())
+        {
+            return null;
+        }
+
+        TileMarkerData[] markers;
+        try
+        {
+            markers = GSON.fromJson(trimmed, TileMarkerData[].class);
+        }
+        catch (JsonSyntaxException ex)
+        {
+            return null;
+        }
+
+        if (markers == null || markers.length != 1 || markers[0] == null)
+        {
+            return null;
+        }
+
+        TileMarkerData marker = markers[0];
+        if (marker.regionId != INFERNO_REGION_ID)
+        {
+            return null;
+        }
+
+        if (marker.z != 0)
+        {
+            return null;
+        }
+
+        int gridX = marker.regionX - REGION_X_OFFSET;
+        int gridY = REGION_Y_OFFSET - marker.regionY;
+        if (gridX < 0 || gridX >= GRID_WIDTH || gridY < 0 || gridY >= GRID_HEIGHT)
+        {
+            return null;
+        }
+
+        WorldPoint wp = WorldPoint.fromRegion(marker.regionId, marker.regionX, marker.regionY, marker.z);
+        return new StartTile(marker.regionX, marker.regionY, gridX, gridY, wp, START_TILE_COLOR, START_TILE_LABEL);
     }
 
     private String buildCode(List<SpawnSnapshot> wave)
@@ -373,7 +508,7 @@ public class InfernoScouterPlugin extends Plugin
         batch.clear();
     }
 
-    private boolean isInInferno()
+    boolean isInInferno()
     {
         if (client.getGameState() != GameState.LOGGED_IN)
         {
@@ -392,6 +527,11 @@ public class InfernoScouterPlugin extends Plugin
             }
         }
         return false;
+    }
+
+    StartTile getStartTile()
+    {
+        return startTile;
     }
 
     private static int indexForRegion(int x, int y)
@@ -526,6 +666,38 @@ public class InfernoScouterPlugin extends Plugin
             this.regionX = regionX;
             this.regionY = regionY;
         }
+    }
+
+    static final class StartTile
+    {
+        final int regionX;
+        final int regionY;
+        final int gridX;
+        final int gridY;
+        final WorldPoint worldPoint;
+        final Color color;
+        final String label;
+
+        StartTile(int regionX, int regionY, int gridX, int gridY, WorldPoint worldPoint, Color color, String label)
+        {
+            this.regionX = regionX;
+            this.regionY = regionY;
+            this.gridX = gridX;
+            this.gridY = gridY;
+            this.worldPoint = worldPoint;
+            this.color = color;
+            this.label = label;
+        }
+    }
+
+    private static final class TileMarkerData
+    {
+        int regionId;
+        int regionX;
+        int regionY;
+        int z;
+        String color;
+        String label;
     }
 
     private static long key(int x, int y)

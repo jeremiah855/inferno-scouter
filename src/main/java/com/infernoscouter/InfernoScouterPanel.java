@@ -12,6 +12,8 @@ import java.awt.RenderingHints;
 import java.awt.Toolkit;
 import java.awt.datatransfer.StringSelection;
 import java.util.List;
+import java.awt.event.ActionListener;
+import java.awt.Component;
 import javax.swing.BorderFactory;
 import javax.swing.Box;
 import javax.swing.BoxLayout;
@@ -20,6 +22,7 @@ import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JTextArea;
 import javax.swing.JTextField;
+import javax.swing.SwingConstants;
 import net.runelite.client.ui.PluginPanel;
 
 public class InfernoScouterPanel extends PluginPanel
@@ -34,6 +37,9 @@ public class InfernoScouterPanel extends PluginPanel
     private final ColorSwatch rangerSwatch = new ColorSwatch();
     private final ColorSwatch magerSwatch = new ColorSwatch();
     private final CompassToggle compassToggle = new CompassToggle();
+    private final JButton pasteStartButton = new JButton("Paste tilemarker");
+    private final JButton resetStartButton = new JButton("Reset");
+    private final JTextField startTileField = new JTextField();
     private boolean southUp = true;
 
     public InfernoScouterPanel()
@@ -76,7 +82,40 @@ public class InfernoScouterPanel extends PluginPanel
 
         add(header, BorderLayout.NORTH);
         spawnImage.setPreferredSize(new Dimension(300, 310));
-        add(spawnImage, BorderLayout.CENTER);
+        spawnImage.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        startTileField.setEditable(false);
+        startTileField.setFocusable(false);
+        startTileField.setHorizontalAlignment(SwingConstants.CENTER);
+        startTileField.setText("");
+        startTileField.setPreferredSize(new Dimension(90, 26));
+        startTileField.setMaximumSize(new Dimension(110, 26));
+
+        JPanel startRow = new JPanel();
+        startRow.setLayout(new BoxLayout(startRow, BoxLayout.X_AXIS));
+        startRow.setOpaque(false);
+        startRow.setAlignmentX(Component.LEFT_ALIGNMENT);
+        startRow.add(pasteStartButton);
+        startRow.add(Box.createHorizontalStrut(6));
+        startRow.add(startTileField);
+        startRow.add(Box.createHorizontalGlue());
+
+        JPanel resetRow = new JPanel();
+        resetRow.setLayout(new BoxLayout(resetRow, BoxLayout.X_AXIS));
+        resetRow.setOpaque(false);
+        resetRow.setAlignmentX(Component.LEFT_ALIGNMENT);
+        resetRow.add(resetStartButton);
+        resetRow.add(Box.createHorizontalGlue());
+
+        JPanel centerPanel = new JPanel();
+        centerPanel.setLayout(new BoxLayout(centerPanel, BoxLayout.Y_AXIS));
+        centerPanel.setOpaque(false);
+        centerPanel.add(spawnImage);
+        centerPanel.add(Box.createVerticalStrut(6));
+        centerPanel.add(startRow);
+        centerPanel.add(Box.createVerticalStrut(4));
+        centerPanel.add(resetRow);
+        add(centerPanel, BorderLayout.CENTER);
 
         JPanel legendContainer = new JPanel();
         legendContainer.setLayout(new BoxLayout(legendContainer, BoxLayout.Y_AXIS));
@@ -141,6 +180,27 @@ public class InfernoScouterPanel extends PluginPanel
         magerSwatch.setColor(mager);
     }
 
+    public void setStartTile(int x, int y, Color color)
+    {
+        spawnImage.setStartTile(x, y, color);
+    }
+
+    public void clearStartTile()
+    {
+        spawnImage.clearStartTile();
+    }
+
+    public void setStartTileDisplay(String text)
+    {
+        startTileField.setText(text == null ? "" : text);
+    }
+
+    public void setStartTileActions(Runnable pasteAction, Runnable resetAction)
+    {
+        setButtonAction(pasteStartButton, pasteAction);
+        setButtonAction(resetStartButton, resetAction);
+    }
+
     public void setSouthUp(boolean southUp)
     {
         this.southUp = southUp;
@@ -180,6 +240,18 @@ public class InfernoScouterPanel extends PluginPanel
         row.add(swatch, BorderLayout.WEST);
         row.add(label, BorderLayout.CENTER);
         return row;
+    }
+
+    private static void setButtonAction(JButton button, Runnable action)
+    {
+        for (ActionListener listener : button.getActionListeners())
+        {
+            button.removeActionListener(listener);
+        }
+        if (action != null)
+        {
+            button.addActionListener(e -> action.run());
+        }
     }
 
     private static final class ColorSwatch extends JPanel

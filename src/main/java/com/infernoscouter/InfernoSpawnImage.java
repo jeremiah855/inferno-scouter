@@ -22,6 +22,10 @@ public class InfernoSpawnImage extends JComponent
     private final BufferedImage baseImage;
     private final List<Spawn> spawns = new ArrayList<>();
     private boolean southUp = true;
+    private boolean hasStartTile = false;
+    private int startTileX = 0;
+    private int startTileY = 0;
+    private Color startTileColor = null;
 
     public InfernoSpawnImage()
     {
@@ -46,6 +50,22 @@ public class InfernoSpawnImage extends JComponent
             return;
         }
         this.southUp = southUp;
+        repaint();
+    }
+
+    public void setStartTile(int x, int y, Color color)
+    {
+        this.hasStartTile = true;
+        this.startTileX = x;
+        this.startTileY = y;
+        this.startTileColor = color;
+        repaint();
+    }
+
+    public void clearStartTile()
+    {
+        this.hasStartTile = false;
+        this.startTileColor = null;
         repaint();
     }
 
@@ -131,6 +151,26 @@ public class InfernoSpawnImage extends JComponent
 
                 g2.setColor(textColorFor(spawn.color));
                 g2.drawString(letter, textX, textY);
+            }
+
+            if (hasStartTile && startTileColor != null)
+            {
+                int drawX = startTileX;
+                int drawY = startTileY;
+                if (southUp)
+                {
+                    drawX = BASE_WIDTH_TILES - drawX - 1;
+                    drawY = BASE_HEIGHT_TILES - drawY - 1;
+                }
+
+                int px = xOffset + drawX * tileSize;
+                int py = yOffset + drawY * tileSize;
+
+                g2.setColor(startTileColor);
+                g2.fillRect(px, py, tileSize, tileSize);
+
+                g2.setColor(darken(startTileColor, 0.7f));
+                g2.drawRect(px, py, Math.max(1, tileSize - 1), Math.max(1, tileSize - 1));
             }
         }
         finally

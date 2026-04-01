@@ -242,7 +242,7 @@ public class InfernoScouterPlugin extends Plugin
             return;
         }
 
-        batch.add(new SpawnSnapshot(type, wp.getRegionX(), wp.getRegionY()));
+        batch.add(new SpawnSnapshot(type, wp.getRegionX(), wp.getRegionY(), npc.getIndex()));
     }
 
     @Subscribe
@@ -444,6 +444,7 @@ public class InfernoScouterPlugin extends Plugin
     {
         char[] out = new char[9];
         Arrays.fill(out, 'o');
+        Map<Integer, SpawnSnapshot> bySpawnSlot = new HashMap<>();
 
         for (SpawnSnapshot s : wave)
         {
@@ -451,10 +452,47 @@ public class InfernoScouterPlugin extends Plugin
             if (idx >= 0 && idx < out.length)
             {
                 out[idx] = letterFor(s.type);
+                bySpawnSlot.put(idx, s);
             }
         }
 
-        return "[" + new String(out) + "]";
+        Map<Integer, Integer> rankBySpawnSlot = buildRankBySpawnSlot(bySpawnSlot);
+        int lowestRank = rankBySpawnSlot.size();
+
+        StringBuilder code = new StringBuilder(22);
+        code.append('[');
+        for (int i = 0; i < out.length; i++)
+        {
+            code.append(out[i]);
+            Integer rank = rankBySpawnSlot.get(i);
+            if (rank != null && rank < lowestRank)
+            {
+                code.append(rank);
+            }
+        }
+        code.append(']');
+        return code.toString();
+    }
+
+    private static Map<Integer, Integer> buildRankBySpawnSlot(Map<Integer, SpawnSnapshot> bySpawnSlot)
+    {
+        List<Map.Entry<Integer, SpawnSnapshot>> entries = new ArrayList<>(bySpawnSlot.entrySet());
+        entries.sort((a, b) ->
+        {
+            int byNpcIndex = Integer.compare(b.getValue().npcIndex, a.getValue().npcIndex);
+            if (byNpcIndex != 0)
+            {
+                return byNpcIndex;
+            }
+            return Integer.compare(a.getKey(), b.getKey());
+        });
+
+        Map<Integer, Integer> rankBySpawnSlot = new HashMap<>();
+        for (int i = 0; i < entries.size(); i++)
+        {
+            rankBySpawnSlot.put(entries.get(i).getKey(), i + 1);
+        }
+        return rankBySpawnSlot;
     }
 
     private List<InfernoSpawnImage.Spawn> buildRenderSpawns(List<SpawnSnapshot> wave)
@@ -658,12 +696,14 @@ public class InfernoScouterPlugin extends Plugin
         final MobType type;
         final int regionX;
         final int regionY;
+        final int npcIndex;
 
-        SpawnSnapshot(MobType type, int regionX, int regionY)
+        SpawnSnapshot(MobType type, int regionX, int regionY, int npcIndex)
         {
             this.type = type;
             this.regionX = regionX;
             this.regionY = regionY;
+            this.npcIndex = npcIndex;
         }
     }
 

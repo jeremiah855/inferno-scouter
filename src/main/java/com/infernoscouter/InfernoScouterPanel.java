@@ -129,8 +129,8 @@ public class InfernoScouterPanel extends PluginPanel
         legendArea.setWrapStyleWord(true);
         legendArea.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
         legendArea.setText(
-                "The 9 characters of the code represents the 9 spawn positions as they appear in reading order, " +
-                        "and what spawns on each one for the scouted wave:"
+                "The 9 base slots in the code are the 9 spawn positions in reading order. " +
+                        "Numbers after letters show NPC index rank (1 = highest index, no number = last):"
         );
 
         legendContainer.add(legendArea);

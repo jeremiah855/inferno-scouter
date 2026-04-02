@@ -11,6 +11,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -21,11 +22,16 @@ import javax.inject.Inject;
 import net.runelite.api.ChatMessageType;
 import net.runelite.api.Client;
 import net.runelite.api.GameState;
+import net.runelite.api.GameObject;
 import net.runelite.api.NPC;
+import net.runelite.api.Scene;
+import net.runelite.api.Tile;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.ClientTick;
 import net.runelite.api.events.GameStateChanged;
+import net.runelite.api.events.GameObjectDespawned;
+import net.runelite.api.events.GameObjectSpawned;
 import net.runelite.api.events.NpcSpawned;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.events.ConfigChanged;
@@ -53,7 +59,13 @@ public class InfernoScouterPlugin extends Plugin
     private static final Pattern WAVE_MESSAGE = Pattern.compile("Wave: (\\d+)");
     private static final Color PLACEHOLDER_COLOR = new Color(210, 210, 210);
     private static final Color START_TILE_COLOR = new Color(0xFF51B4BA, true);
+    private static final Color PILLAR_ALIVE_COLOR = new Color(18, 18, 18, 220);
+    private static final Color PILLAR_DESTROYED_COLOR = new Color(100, 70, 76, 190);
     private static final String START_TILE_LABEL = "Start";
+    private static final int PILLAR_SIZE = 3;
+
+    // Mirrors inferno-2d-map pillar object IDs and coordinate matching.
+    private static final Set<Integer> PILLAR_OBJECT_IDS = Set.of(30353, 30354, 30355);
 
     private static final Set<Integer> ALLOWED_NPC_IDS = Set.of(
             7692, // Jal-MejRah (bat)
@@ -84,6 +96,7 @@ public class InfernoScouterPlugin extends Plugin
     private int pendingWaveStartTick = -1;
     private StartTile startTile = null;
     private String startTileDisplayText = "";
+    private final EnumSet<PillarSlot> alivePillars = EnumSet.allOf(PillarSlot.class);
 
     private final List<SpawnSnapshot> currentWaveSpawns = new ArrayList<>();
 
@@ -106,6 +119,7 @@ public class InfernoScouterPlugin extends Plugin
         panel.setCode(lastCode);
         panel.setWaveNumber(currentWaveNumber);
         panel.setSpawns(buildInitialSpawns());
+        panel.setPillars(buildPillarRender());
         panel.setStartTileActions(this::handlePasteStartTile, this::handleResetStartTile);
         panel.setStartTileDisplay(startTileDisplayText);
         applyStartTileToPanel();
@@ -232,6 +246,9 @@ public class InfernoScouterPlugin extends Plugin
             batchWaveNumber = pendingWaveNumber;
             batch.clear();
             quietClientTicks = 0;
+
+            // Keep pillar state in sync with the same initial scout tick as NPC detection.
+            syncPillarsFromScene();
         }
 
         quietClientTicks = 0;
@@ -243,6 +260,48 @@ public class InfernoScouterPlugin extends Plugin
         }
 
         batch.add(new SpawnSnapshot(type, wp.getRegionX(), wp.getRegionY(), npc.getIndex()));
+    }
+
+    @Subscribe
+    public void onGameObjectSpawned(GameObjectSpawned event)
+    {
+        if (!isInInferno())
+        {
+            return;
+        }
+
+        GameObject gameObject = event.getGameObject();
+        if (gameObject == null || !PILLAR_OBJECT_IDS.contains(gameObject.getId()))
+        {
+            return;
+        }
+
+        PillarSlot slot = pillarSlotFor(gameObject);
+        if (slot != null && alivePillars.add(slot))
+        {
+            updatePillarsOnPanel();
+        }
+    }
+
+    @Subscribe
+    public void onGameObjectDespawned(GameObjectDespawned event)
+    {
+        if (!isInInferno())
+        {
+            return;
+        }
+
+        GameObject gameObject = event.getGameObject();
+        if (gameObject == null)
+        {
+            return;
+        }
+
+        PillarSlot slot = pillarSlotFor(gameObject);
+        if (slot != null && alivePillars.remove(slot))
+        {
+            updatePillarsOnPanel();
+        }
     }
 
     @Subscribe
@@ -287,6 +346,7 @@ public class InfernoScouterPlugin extends Plugin
                     config.magerColor()
             );
             panel.setSpawns(buildInitialSpawns());
+            panel.setPillars(buildPillarRender());
         }
     }
 
@@ -301,6 +361,8 @@ public class InfernoScouterPlugin extends Plugin
         {
             return;
         }
+
+        syncPillarsFromScene();
 
         lastCode = buildCode(batch);
         currentWaveSpawns.clear();
@@ -327,6 +389,7 @@ public class InfernoScouterPlugin extends Plugin
         panel.setCode(lastCode);
         panel.setWaveNumber(currentWaveNumber);
         panel.setSpawns(buildInitialSpawns());
+        panel.setPillars(buildPillarRender());
         applyStartTileToPanel();
     }
 
@@ -536,6 +599,118 @@ public class InfernoScouterPlugin extends Plugin
         return spawns;
     }
 
+    private List<InfernoSpawnImage.Pillar> buildPillarRender()
+    {
+        List<InfernoSpawnImage.Pillar> pillars = new ArrayList<>();
+        for (PillarSlot slot : PillarSlot.values())
+        {
+            boolean alive = alivePillars.contains(slot);
+            Color color = alive ? PILLAR_ALIVE_COLOR : PILLAR_DESTROYED_COLOR;
+            String label = alive ? String.valueOf(slot.label) : null;
+            pillars.add(new InfernoSpawnImage.Pillar(slot.x, slot.y, PILLAR_SIZE, color, label));
+        }
+        return pillars;
+    }
+
+    private void updatePillarsOnPanel()
+    {
+        if (panel == null)
+        {
+            return;
+        }
+        panel.setPillars(buildPillarRender());
+    }
+
+    private void syncPillarsFromScene()
+    {
+        if (!isInInferno())
+        {
+            return;
+        }
+
+        Scene scene = client.getScene();
+        if (scene == null)
+        {
+            return;
+        }
+
+        Tile[][][] tiles = scene.getTiles();
+        int plane = client.getPlane();
+        if (tiles == null || plane < 0 || plane >= tiles.length || tiles[plane] == null)
+        {
+            return;
+        }
+
+        EnumSet<PillarSlot> detected = EnumSet.noneOf(PillarSlot.class);
+        Tile[][] planeTiles = tiles[plane];
+        for (int x = 0; x < planeTiles.length; x++)
+        {
+            Tile[] column = planeTiles[x];
+            if (column == null)
+            {
+                continue;
+            }
+
+            for (int y = 0; y < column.length; y++)
+            {
+                Tile tile = column[y];
+                if (tile == null)
+                {
+                    continue;
+                }
+
+                GameObject[] gameObjects = tile.getGameObjects();
+                if (gameObjects == null)
+                {
+                    continue;
+                }
+
+                for (GameObject gameObject : gameObjects)
+                {
+                    if (gameObject == null || !PILLAR_OBJECT_IDS.contains(gameObject.getId()))
+                    {
+                        continue;
+                    }
+
+                    PillarSlot slot = pillarSlotFor(gameObject);
+                    if (slot != null)
+                    {
+                        detected.add(slot);
+                    }
+                }
+            }
+        }
+
+        if (!alivePillars.equals(detected))
+        {
+            alivePillars.clear();
+            alivePillars.addAll(detected);
+            updatePillarsOnPanel();
+        }
+    }
+
+    private static PillarSlot pillarSlotFor(GameObject gameObject)
+    {
+        WorldPoint worldPoint = gameObject.getWorldLocation();
+        if (worldPoint == null)
+        {
+            return null;
+        }
+
+        // Same coordinate conversion used by inferno-2d-map for pillar matching.
+        int scoutX = worldPoint.getRegionX() - 18;
+        int scoutY = 47 - worldPoint.getRegionY();
+
+        for (PillarSlot slot : PillarSlot.values())
+        {
+            if (slot.x == scoutX && slot.y == scoutY)
+            {
+                return slot;
+            }
+        }
+        return null;
+    }
+
     private void clearBatch()
     {
         batchOpen = false;
@@ -679,6 +854,24 @@ public class InfernoScouterPlugin extends Plugin
         {
             this.x = x;
             this.y = y;
+        }
+    }
+
+    private enum PillarSlot
+    {
+        WEST(0, 9, 'W'),
+        NORTH(17, 7, 'N'),
+        SOUTH(10, 23, 'S');
+
+        final int x;
+        final int y;
+        final char label;
+
+        PillarSlot(int x, int y, char label)
+        {
+            this.x = x;
+            this.y = y;
+            this.label = label;
         }
     }
 

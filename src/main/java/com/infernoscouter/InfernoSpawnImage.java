@@ -18,8 +18,10 @@ public class InfernoSpawnImage extends JComponent
     private static final int BASE_HEIGHT_TILES = 30;
     private static final Color GRID_COLOR = new Color(255, 255, 255, 40);
     private static final Color FALLBACK_BG = new Color(30, 30, 30);
+    private static final Color PILLAR_LABEL_COLOR = new Color(155, 155, 155);
 
     private final BufferedImage baseImage;
+    private final List<Pillar> pillars = new ArrayList<>();
     private final List<Spawn> spawns = new ArrayList<>();
     private boolean southUp = true;
     private boolean hasStartTile = false;
@@ -39,6 +41,16 @@ public class InfernoSpawnImage extends JComponent
         if (newSpawns != null)
         {
             spawns.addAll(newSpawns);
+        }
+        repaint();
+    }
+
+    public void setPillars(List<Pillar> newPillars)
+    {
+        pillars.clear();
+        if (newPillars != null)
+        {
+            pillars.addAll(newPillars);
         }
         repaint();
     }
@@ -118,6 +130,41 @@ public class InfernoSpawnImage extends JComponent
             {
                 int py = yOffset + (southUp ? (BASE_HEIGHT_TILES - y) * tileSize : y * tileSize);
                 g2.drawLine(xOffset, py, xOffset + imageWidth, py);
+            }
+
+            for (Pillar pillar : pillars)
+            {
+                int drawX = pillar.x;
+                int drawY = pillar.y - (pillar.size - 1);
+                if (southUp)
+                {
+                    drawX = BASE_WIDTH_TILES - drawX - pillar.size;
+                    drawY = BASE_HEIGHT_TILES - drawY - pillar.size;
+                }
+
+                int px = xOffset + drawX * tileSize;
+                int py = yOffset + drawY * tileSize;
+                int sizePx = pillar.size * tileSize;
+
+                g2.setColor(pillar.color);
+                g2.fillRect(px, py, sizePx, sizePx);
+
+                g2.setColor(darken(pillar.color, 0.7f));
+                g2.drawRect(px, py, Math.max(1, sizePx - 1), Math.max(1, sizePx - 1));
+
+                if (pillar.label != null)
+                {
+                    int fontSize = Math.max(10, (sizePx * 3) / 5);
+                    Font font = g2.getFont().deriveFont(Font.BOLD, (float) fontSize);
+                    g2.setFont(font);
+                    FontMetrics fm = g2.getFontMetrics(font);
+                    int textWidth = fm.stringWidth(pillar.label);
+                    int textX = px + (sizePx - textWidth) / 2;
+                    int textY = py + (sizePx + fm.getAscent() - fm.getDescent()) / 2;
+
+                    g2.setColor(PILLAR_LABEL_COLOR);
+                    g2.drawString(pillar.label, textX, textY);
+                }
             }
 
             for (Spawn spawn : spawns)
@@ -212,4 +259,23 @@ public class InfernoSpawnImage extends JComponent
             this.letter = letter;
         }
     }
+
+    public static final class Pillar
+    {
+        private final int x;
+        private final int y;
+        private final int size;
+        private final Color color;
+        private final String label;
+
+        public Pillar(int x, int y, int size, Color color, String label)
+        {
+            this.x = x;
+            this.y = y;
+            this.size = size;
+            this.color = color;
+            this.label = label;
+        }
+    }
 }
+

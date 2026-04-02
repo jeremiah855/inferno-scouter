@@ -67,7 +67,7 @@ public class InfernoScouterPanel extends PluginPanel
         header.add(waveRow);
 
         codeField.setEditable(false);
-        codeField.setFont(new Font(Font.MONOSPACED, Font.BOLD, 18));
+        codeField.setFont(new Font(Font.MONOSPACED, Font.BOLD, 15));
         codeField.setText("[?????????]");
         codeField.setPreferredSize(new Dimension(10, 42));
 
@@ -169,6 +169,11 @@ public class InfernoScouterPanel extends PluginPanel
     public void setSpawns(List<InfernoSpawnImage.Spawn> spawns)
     {
         spawnImage.setSpawns(spawns);
+    }
+
+    public void setPillars(List<InfernoSpawnImage.Pillar> pillars)
+    {
+        spawnImage.setPillars(pillars);
     }
 
     public void setLegendColors(Color bat, Color blob, Color melee, Color ranger, Color mager)

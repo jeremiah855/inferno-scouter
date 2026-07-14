@@ -67,9 +67,9 @@ public class InfernoScouterPanel extends PluginPanel
         header.add(waveRow);
 
         codeField.setEditable(false);
-        codeField.setFont(new Font(Font.MONOSPACED, Font.BOLD, 15));
-        codeField.setText("[?????????]");
-        codeField.setPreferredSize(new Dimension(10, 42));
+        codeField.setFont(new Font(Font.MONOSPACED, Font.BOLD, 10));
+        codeField.setText("[ooooooooo000000]");
+        codeField.setPreferredSize(new Dimension(10, 30));
 
         JButton copy = new JButton("Copy code");
         copy.addActionListener(e -> copyText(codeField.getText()));
@@ -81,7 +81,7 @@ public class InfernoScouterPanel extends PluginPanel
         header.add(codeRow);
 
         add(header, BorderLayout.NORTH);
-        spawnImage.setPreferredSize(new Dimension(300, 310));
+        spawnImage.setPreferredSize(new Dimension(330, 342));
         spawnImage.setAlignmentX(Component.LEFT_ALIGNMENT);
 
         startTileField.setEditable(false);
@@ -130,7 +130,8 @@ public class InfernoScouterPanel extends PluginPanel
         legendArea.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
         legendArea.setText(
                 "The 9 base slots in the code are the 9 spawn positions in reading order. " +
-                        "Numbers after letters show NPC index rank (1 = highest index, no number = last):"
+                        "Numbers after letters show NPC index rank. " +
+                        "The final 6 digits are pillar HP in N/S/W order:"
         );
 
         legendContainer.add(legendArea);

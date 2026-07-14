@@ -11,6 +11,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.EnumMap;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
@@ -19,6 +20,7 @@ import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import javax.inject.Inject;
+import net.runelite.api.Actor;
 import net.runelite.api.ChatMessageType;
 import net.runelite.api.Client;
 import net.runelite.api.GameState;
@@ -29,9 +31,11 @@ import net.runelite.api.Tile;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.ClientTick;
+import net.runelite.api.events.GameTick;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GameObjectDespawned;
 import net.runelite.api.events.GameObjectSpawned;
+import net.runelite.api.events.HitsplatApplied;
 import net.runelite.api.events.NpcSpawned;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.events.ConfigChanged;
@@ -62,10 +66,17 @@ public class InfernoScouterPlugin extends Plugin
     private static final Color PILLAR_ALIVE_COLOR = new Color(18, 18, 18, 220);
     private static final Color PILLAR_DESTROYED_COLOR = new Color(100, 70, 76, 190);
     private static final String START_TILE_LABEL = "Start";
+    private static final String DEFAULT_CODE = "[ooooooooo000000]";
     private static final int PILLAR_SIZE = 3;
 
     // Mirrors inferno-2d-map pillar object IDs and coordinate matching.
     private static final Set<Integer> PILLAR_OBJECT_IDS = Set.of(30353, 30354, 30355);
+    private static final Set<Integer> PILLAR_NPC_IDS = Set.of(7709, 7710);
+    private static final List<PillarSlot> PILLAR_CODE_ORDER = List.of(
+            PillarSlot.NORTH,
+            PillarSlot.SOUTH,
+            PillarSlot.WEST
+    );
 
     private static final Set<Integer> ALLOWED_NPC_IDS = Set.of(
             7692, // Jal-MejRah (bat)
@@ -90,13 +101,15 @@ public class InfernoScouterPlugin extends Plugin
     private InfernoScouterPanel panel;
     private NavigationButton navButton;
 
-    private String lastCode = "[?????????]";
+    private String lastCode = DEFAULT_CODE;
     private int currentWaveNumber = -1;
     private int pendingWaveNumber = -1;
     private int pendingWaveStartTick = -1;
     private StartTile startTile = null;
     private String startTileDisplayText = "";
     private final EnumSet<PillarSlot> alivePillars = EnumSet.allOf(PillarSlot.class);
+    private final EnumMap<PillarSlot, Integer> pillarHpBySlot = buildInitialPillarHp();
+    private final EnumMap<PillarSlot, Integer> displayedPillarHpBySlot = buildInitialPillarHp();
 
     private final List<SpawnSnapshot> currentWaveSpawns = new ArrayList<>();
 
@@ -206,6 +219,10 @@ public class InfernoScouterPlugin extends Plugin
         {
             pendingWaveNumber = Integer.parseInt(matcher.group(1));
             pendingWaveStartTick = client.getTickCount();
+            if (pendingWaveNumber == 1)
+            {
+                resetPillarHp();
+            }
             if (batchOpen && batchTick == pendingWaveStartTick && batchWaveNumber <= 0)
             {
                 batchWaveNumber = pendingWaveNumber;
@@ -222,7 +239,18 @@ public class InfernoScouterPlugin extends Plugin
         }
 
         NPC npc = event.getNpc();
-        if (npc == null || !ALLOWED_NPC_IDS.contains(npc.getId()))
+        if (npc == null)
+        {
+            return;
+        }
+
+        if (PILLAR_NPC_IDS.contains(npc.getId()))
+        {
+            syncPillarsFromScene();
+            return;
+        }
+
+        if (!ALLOWED_NPC_IDS.contains(npc.getId()))
         {
             return;
         }
@@ -249,6 +277,7 @@ public class InfernoScouterPlugin extends Plugin
 
             // Keep pillar state in sync with the same initial scout tick as NPC detection.
             syncPillarsFromScene();
+            snapshotDisplayedPillarHp();
         }
 
         quietClientTicks = 0;
@@ -277,9 +306,12 @@ public class InfernoScouterPlugin extends Plugin
         }
 
         PillarSlot slot = pillarSlotFor(gameObject);
-        if (slot != null && alivePillars.add(slot))
+        if (slot != null)
         {
-            updatePillarsOnPanel();
+            int oldHp = pillarHpBySlot.getOrDefault(slot, 0);
+            int newHp = oldHp > 0 ? oldHp : 99;
+            alivePillars.add(slot);
+            pillarHpBySlot.put(slot, newHp);
         }
     }
 
@@ -298,9 +330,38 @@ public class InfernoScouterPlugin extends Plugin
         }
 
         PillarSlot slot = pillarSlotFor(gameObject);
-        if (slot != null && alivePillars.remove(slot))
+        if (slot != null)
         {
-            updatePillarsOnPanel();
+            alivePillars.remove(slot);
+            pillarHpBySlot.put(slot, 0);
+        }
+    }
+
+    @Subscribe
+    public void onHitsplatApplied(HitsplatApplied event)
+    {
+        if (!isInInferno())
+        {
+            return;
+        }
+
+        Actor actor = event.getActor();
+        if (actor instanceof NPC)
+        {
+            NPC npc = (NPC) actor;
+            if (PILLAR_NPC_IDS.contains(npc.getId()))
+            {
+                updatePillarHpFromNpcs();
+            }
+        }
+    }
+
+    @Subscribe
+    public void onGameTick(GameTick tick)
+    {
+        if (isInInferno())
+        {
+            updatePillarHpFromNpcs();
         }
     }
 
@@ -522,7 +583,7 @@ public class InfernoScouterPlugin extends Plugin
         Map<Integer, Integer> rankBySpawnSlot = buildRankBySpawnSlot(bySpawnSlot);
         int lowestRank = rankBySpawnSlot.size();
 
-        StringBuilder code = new StringBuilder(22);
+        StringBuilder code = new StringBuilder(28);
         code.append('[');
         for (int i = 0; i < out.length; i++)
         {
@@ -533,8 +594,24 @@ public class InfernoScouterPlugin extends Plugin
                 code.append(rank);
             }
         }
+        appendPillarHp(code);
         code.append(']');
         return code.toString();
+    }
+
+    private void appendPillarHp(StringBuilder code)
+    {
+        for (PillarSlot slot : PILLAR_CODE_ORDER)
+        {
+            appendTwoDigits(code, displayedPillarHpBySlot.getOrDefault(slot, 0));
+        }
+    }
+
+    private static void appendTwoDigits(StringBuilder out, int value)
+    {
+        int clamped = Math.max(0, Math.min(99, value));
+        out.append((char) ('0' + (clamped / 10)));
+        out.append((char) ('0' + (clamped % 10)));
     }
 
     private static Map<Integer, Integer> buildRankBySpawnSlot(Map<Integer, SpawnSnapshot> bySpawnSlot)
@@ -604,12 +681,22 @@ public class InfernoScouterPlugin extends Plugin
         List<InfernoSpawnImage.Pillar> pillars = new ArrayList<>();
         for (PillarSlot slot : PillarSlot.values())
         {
-            boolean alive = alivePillars.contains(slot);
+            int hp = displayedPillarHpBySlot.getOrDefault(slot, 0);
+            boolean alive = hp > 0;
             Color color = alive ? PILLAR_ALIVE_COLOR : PILLAR_DESTROYED_COLOR;
-            String label = alive ? String.valueOf(slot.label) : null;
+            String label = alive ? pillarLabelFor(slot, hp) : null;
             pillars.add(new InfernoSpawnImage.Pillar(slot.x, slot.y, PILLAR_SIZE, color, label));
         }
         return pillars;
+    }
+
+    private static String pillarLabelFor(PillarSlot slot, int hp)
+    {
+        if (hp >= 99)
+        {
+            return String.valueOf(slot.label);
+        }
+        return String.valueOf(Math.max(1, Math.min(98, hp)));
     }
 
     private void updatePillarsOnPanel()
@@ -642,6 +729,7 @@ public class InfernoScouterPlugin extends Plugin
         }
 
         EnumSet<PillarSlot> detected = EnumSet.noneOf(PillarSlot.class);
+        EnumMap<PillarSlot, Integer> detectedHp = new EnumMap<>(PillarSlot.class);
         Tile[][] planeTiles = tiles[plane];
         for (int x = 0; x < planeTiles.length; x++)
         {
@@ -676,16 +764,54 @@ public class InfernoScouterPlugin extends Plugin
                     if (slot != null)
                     {
                         detected.add(slot);
+                        detectedHp.put(slot, pillarHpBySlot.getOrDefault(slot, 99));
                     }
                 }
             }
         }
 
-        if (!alivePillars.equals(detected))
+        for (NPC npc : client.getNpcs())
+        {
+            if (npc == null || !PILLAR_NPC_IDS.contains(npc.getId()))
+            {
+                continue;
+            }
+
+            PillarSlot slot = pillarSlotFor(npc);
+            if (slot == null)
+            {
+                continue;
+            }
+
+            int hp = pillarHpFor(npc);
+            if (hp < 0)
+            {
+                detected.add(slot);
+                detectedHp.putIfAbsent(slot, pillarHpBySlot.getOrDefault(slot, 99));
+            }
+            else if (hp > 0)
+            {
+                detected.add(slot);
+                detectedHp.put(slot, hp);
+            }
+            else
+            {
+                detected.remove(slot);
+                detectedHp.put(slot, 0);
+            }
+        }
+
+        for (PillarSlot slot : PillarSlot.values())
+        {
+            detectedHp.putIfAbsent(slot, detected.contains(slot) ? pillarHpBySlot.getOrDefault(slot, 99) : 0);
+        }
+
+        if (!alivePillars.equals(detected) || !pillarHpBySlot.equals(detectedHp))
         {
             alivePillars.clear();
             alivePillars.addAll(detected);
-            updatePillarsOnPanel();
+            pillarHpBySlot.clear();
+            pillarHpBySlot.putAll(detectedHp);
         }
     }
 
@@ -709,6 +835,152 @@ public class InfernoScouterPlugin extends Plugin
             }
         }
         return null;
+    }
+
+    private static PillarSlot pillarSlotFor(NPC npc)
+    {
+        WorldPoint worldPoint = npc.getWorldLocation();
+        if (worldPoint == null)
+        {
+            return null;
+        }
+
+        int gridX = worldPoint.getRegionX() - REGION_X_OFFSET;
+        int gridY = REGION_Y_OFFSET - worldPoint.getRegionY();
+        PillarSlot containing = pillarSlotContaining(gridX, gridY);
+        if (containing != null)
+        {
+            return containing;
+        }
+
+        return nearestPillarSlot(gridX, gridY);
+    }
+
+    private void updatePillarHpFromNpcs()
+    {
+        for (NPC npc : client.getNpcs())
+        {
+            if (npc == null || !PILLAR_NPC_IDS.contains(npc.getId()))
+            {
+                continue;
+            }
+
+            PillarSlot slot = pillarSlotFor(npc);
+            if (slot == null)
+            {
+                continue;
+            }
+
+            int hp = pillarHpFor(npc);
+            if (hp < 0)
+            {
+                alivePillars.add(slot);
+                continue;
+            }
+
+            boolean alive = hp > 0;
+            if (alive)
+            {
+                alivePillars.add(slot);
+            }
+            else
+            {
+                alivePillars.remove(slot);
+            }
+
+            pillarHpBySlot.put(slot, hp);
+        }
+    }
+
+    private static PillarSlot pillarSlotContaining(int gridX, int gridY)
+    {
+        for (PillarSlot slot : PillarSlot.values())
+        {
+            if (gridX >= slot.x && gridX < slot.x + PILLAR_SIZE
+                    && gridY <= slot.y && gridY > slot.y - PILLAR_SIZE)
+            {
+                return slot;
+            }
+        }
+        return null;
+    }
+
+    private static PillarSlot nearestPillarSlot(int gridX, int gridY)
+    {
+        PillarSlot nearest = null;
+        int nearestDistance = Integer.MAX_VALUE;
+        for (PillarSlot slot : PillarSlot.values())
+        {
+            int centerX = slot.x + 1;
+            int centerY = slot.y - 1;
+            int dx = gridX - centerX;
+            int dy = gridY - centerY;
+            int distance = dx * dx + dy * dy;
+            if (distance < nearestDistance)
+            {
+                nearest = slot;
+                nearestDistance = distance;
+            }
+        }
+        return nearestDistance <= 8 ? nearest : null;
+    }
+
+    private static int pillarHpFor(NPC npc)
+    {
+        if (npc.getId() == 7710 || npc.isDead())
+        {
+            return 0;
+        }
+
+        int ratio = npc.getHealthRatio();
+        int scale = npc.getHealthScale();
+        if (ratio < 0 || scale <= 0)
+        {
+            return -1;
+        }
+
+        if (ratio <= 0)
+        {
+            return 0;
+        }
+
+        if (ratio >= scale)
+        {
+            return 99;
+        }
+
+        return Math.max(1, Math.min(98, (int) Math.round((ratio * 100.0) / scale)));
+    }
+
+    private static EnumMap<PillarSlot, Integer> buildInitialPillarHp()
+    {
+        EnumMap<PillarSlot, Integer> hp = new EnumMap<>(PillarSlot.class);
+        for (PillarSlot slot : PillarSlot.values())
+        {
+            hp.put(slot, 99);
+        }
+        return hp;
+    }
+
+    private void resetPillarHp()
+    {
+        alivePillars.clear();
+        alivePillars.addAll(EnumSet.allOf(PillarSlot.class));
+        pillarHpBySlot.clear();
+        pillarHpBySlot.putAll(buildInitialPillarHp());
+        snapshotDisplayedPillarHp();
+        lastCode = DEFAULT_CODE;
+        if (panel != null)
+        {
+            panel.setCode(lastCode);
+        }
+        updatePillarsOnPanel();
+    }
+
+    private void snapshotDisplayedPillarHp()
+    {
+        displayedPillarHpBySlot.clear();
+        displayedPillarHpBySlot.putAll(pillarHpBySlot);
     }
 
     private void clearBatch()
